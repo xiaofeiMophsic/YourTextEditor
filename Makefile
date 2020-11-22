@@ -1,2 +1,2 @@
-kilo: kilo.c
-	$(CC) kilo.c -o kilo -Wall -Wextra -pedantic -std=c99
+youreditor: youreditor.c
+	$(CC) youreditor.c -o youreditor -Wall -Wextra -pedantic -std=c99
