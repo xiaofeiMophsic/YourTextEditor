@@ -7,6 +7,10 @@
 #include <termios.h>
 #include <unistd.h>
 
+#define _DEFALUT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
 #define YOUR_EDITOR_VERSION "0.0.1"
 // ctrl 组合键时，其编码会将对应按键第5，6位设置为0
 #define CTRL_KEY(k) ((k)&0x1f)
@@ -25,11 +29,22 @@ enum editorKey{
     DEL_KEY
 };
 
+/*** data ***/
+
+typedef struct erow {
+    int size;
+    char *chars;
+} erow;
+
 struct editorConfig {
     // 当前光标位置
     int cx, cy;
+    int rowoff;
     int screenrows;
     int screencols;
+
+    int numrows;
+    erow *row;
     struct termios orig_termios;
 };
 
@@ -171,6 +186,34 @@ int getWindowSize(int *rows, int *cols) {
     }
 }
 
+/*** row operations ***/
+
+void editorAppendRow(char *s, size_t len) {
+    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+    int at = E.numrows;
+    E.row[at].size = len;
+    E.row[at].chars = malloc(len + 1);
+    memcpy(E.row[at].chars, s, len);
+    E.row[at].chars[len] = '\0';
+    E.numrows++;
+}
+
+void editorOpen(char *filename) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp) die("fopen");
+
+    char *line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    while((linelen = getline(&line, &linecap, fp)) != -1) {
+        while (linelen > 0&&(line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
+            linelen --;
+        editorAppendRow(line, linelen);
+    }
+    free(line);
+    fclose(fp);
+}
+
 /*** append buffer ***/
 
 /**
@@ -211,6 +254,15 @@ void printWelcome(struct abuf *ab, char *s, int len){
     abAppend(ab, s, len);
 }
 
+void editorScroll() {
+    if (E.cy < E.rowoff) {
+        E.rowoff = E.cy;
+    }
+    if (E.cy >= E.rowoff + E.screenrows) {
+        E.rowoff = E.cy - E.screenrows + 1;
+    }
+}
+
 /**
  *
  * 绘制 "~"
@@ -220,25 +272,39 @@ void editorDrawRows(struct abuf *ab) {
     int welcomep = E.screenrows / 3;
     int authorp = welcomep + 2;
     for (y = 0; y < E.screenrows; y++) {
-        if (y == welcomep) {
-            char welcome[80];
-            int welcomelen =
-                snprintf(welcome, sizeof(welcome), "Your editor -- version %s",
-                            YOUR_EDITOR_VERSION);
-            if (welcomelen > E.screencols) {
-                welcomelen = E.screencols;
+        int filerow = y + E.rowoff;
+        if (filerow >= E.numrows) {
+            if (E.numrows == 0) {
+                if (y == welcomep) {
+                    char welcome[80];
+                    int welcomelen =
+                        snprintf(welcome, sizeof(welcome), "Your editor -- version %s",
+                                    YOUR_EDITOR_VERSION);
+                    if (welcomelen > E.screencols) {
+                        welcomelen = E.screencols;
+                    }
+                    printWelcome(ab, welcome, welcomelen);
+                } else if(y == authorp){
+                    char author[80];
+                    int authorlen =
+                        snprintf(author, sizeof(author), "by xiaofei");
+                    if (authorlen > E.screencols) {
+                        authorlen = E.screencols;
+                    }
+                    printWelcome(ab, author, authorlen);
+                } else {
+                    abAppend(ab, LINE_HEAD, 1);
+                }
+            } else {
+                abAppend(ab, LINE_HEAD, 1);
             }
-            printWelcome(ab, welcome, welcomelen);
-        } else if(y == authorp){
-            char author[80];
-            int authorlen =
-                snprintf(author, sizeof(author), "by xiaofei");
-            if (authorlen > E.screencols) {
-                authorlen = E.screencols;
-            }
-            printWelcome(ab, author, authorlen);
+            
         } else {
-            abAppend(ab, LINE_HEAD, 1);
+            int len = E.row[filerow].size;
+            if (len > E.screencols) {
+                len = E.screencols;
+            }
+            abAppend(ab, E.row[filerow].chars, len);
         }
         // K 表示清除当前行
         // 和J的作用类似
@@ -251,6 +317,8 @@ void editorDrawRows(struct abuf *ab) {
 }
 
 void editorRefreshScreen() {
+    editorScroll();
+
     struct abuf ab = ABUF_INIT;
 
     // 隐藏光标
@@ -267,7 +335,7 @@ void editorRefreshScreen() {
     editorDrawRows(&ab);
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff), E.cx + 1);
     abAppend(&ab, buf, strlen(buf));
 
     // 展示光标
@@ -294,7 +362,7 @@ void editorMoveCursor(int key) {
             E.cy--;
         break;
     case ARROW_DOWN:
-        if(E.cy != E.screenrows - 1)
+        if(E.cy < E.numrows)
             E.cy++;
         break;
     }
@@ -336,15 +404,21 @@ void editorProcessKeypress() {
 void initEditor() {
     E.cx = 0;
     E.cy = 0;
+    E.numrows = 0;
+    E.row = NULL;
+    E.rowoff = 0;
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
         die("getWindowSize");
     }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
 
     enableRawMode();
     initEditor();
+    if (argc >= 2){
+        editorOpen(argv[1]);
+    }
     while (1) {
         struct abuf ab = ABUF_INIT;
         editorRefreshScreen();
